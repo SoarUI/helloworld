@@ -12,8 +12,9 @@
 #include <strings.h>
 #include <fcntl.h>
 #include <errno.h>
+#include<poll.h>
 
-#define MAX_EVENTS 10
+#define MAX_EVENTS 100
 #define PORT 8080
 
 //设置socket连接为非阻塞模式
@@ -33,7 +34,7 @@ void setnonblocking(int sockfd) {
 }
 
 int main(){
-    struct epoll_event ev, events[MAX_EVENTS];
+    struct pollfd ev, events[MAX_EVENTS];
     int addrlen, listenfd, conn_sock, nfds, epfd, fd, i, nread, n;
     struct sockaddr_in local, remote;
     char buf[BUFSIZ];
@@ -54,39 +55,36 @@ int main(){
     }
     listen(listenfd, 20);
 
-    epfd = epoll_create(MAX_EVENTS);
-    if (epfd == -1) {
-        perror("epoll_create");
-        exit(EXIT_FAILURE);
-    }
+memset(events,-1,sizeof events );
+    events[0].events = POLLIN;
+    events[0].fd = listenfd;
 
-    ev.events = EPOLLIN;
-    ev.data.fd = listenfd;
-    if (epoll_ctl(epfd, EPOLL_CTL_ADD, listenfd, &ev) == -1) {
-        perror("epoll_ctl: listen_sock");
-        exit(EXIT_FAILURE);
-    }
 
     for (;;) {
-        nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
-        if (nfds == -1) {
+        nfds = poll(events, MAX_EVENTS, -1);
+        if (nfds <0) {
             perror("epoll_pwait");
             exit(EXIT_FAILURE);
         }
-
-        for (i = 0; i < nfds; ++i) {
-            fd = events[i].data.fd;
-            if (fd == listenfd) {
+    if(nfds==0){
+        continue;}
+        for (i = 0; i < MAX_EVENTS; ++i) {
+            fd = events[i].fd;
+            if(fd<0)
+                continue;
+            if (fd == listenfd && (events[i].revents & POLLIN) ){
                 while ((conn_sock = accept(listenfd,(struct sockaddr *) &remote,
                                 (socklen_t *)&addrlen)) > 0) {
                     setnonblocking(conn_sock);
-                    ev.events = EPOLLIN | EPOLLET;
-                    ev.data.fd = conn_sock;
-                    if (epoll_ctl(epfd, EPOLL_CTL_ADD, conn_sock,
-                                &ev) == -1) {
-                        perror("epoll_ctl: add");
-                        exit(EXIT_FAILURE);
-                    }
+
+                    for(int j=0;j<MAX_EVENTS;j++){
+                        if(events[j].fd<0){
+                            events[j].events = POLLIN ;
+                            events[j].fd = conn_sock;
+                            break;
+                        }
+                    }//for
+
                 }
                 if (conn_sock == -1) {
                     if (errno != EAGAIN && errno != ECONNABORTED
@@ -95,7 +93,7 @@ int main(){
                 }
                 continue;
             }
-            if (events[i].events & EPOLLIN) {
+            if (events[i].revents & POLLIN) {
                 n = 0;
                 while ((nread = read(fd, buf + n, BUFSIZ-1)) > 0) {
                     n += nread;
@@ -103,19 +101,20 @@ int main(){
                 if (nread == -1 && errno != EAGAIN) {
                     perror("read error");
                 }
-                ev.data.fd = fd;
-                ev.events = events[i].events | EPOLLOUT;
-                if (epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev) == -1) {
-                    perror("epoll_ctl: mod");
-                    close(fd);
-                    continue;
+                //close socket
+                if(n==0){
+                    events[i].fd=-1;
                 }
-            }
-            if (events[i].events & EPOLLOUT) {
+                events[i].events |= POLLOUT;
+                 continue;
+                }
+            if (events[i].revents & POLLOUT) {
+
                 sprintf(buf, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\nHello World", 11);
                 int nwrite, data_size = strlen(buf);
                 n = data_size;
                 while (n > 0) {
+                    printf("n:%d i:%d\n",n,i);
                     nwrite = write(fd, buf + data_size - n, n);
                     if (nwrite < n) {
                         if (nwrite == -1 && errno != EAGAIN) {
@@ -123,19 +122,13 @@ int main(){
                         }
                         break;
                     }
+                     printf("nw:%d i:%d\n",nwrite,i);
                     n -= nwrite;
-                }
-                ev.data.fd = fd;
-                ev.events = events[i].events &=~EPOLLOUT;
-                if (epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &ev) == -1) {
-                    perror("epoll_ctl: mod");
-                    close(fd);
-                    continue;
+                     events[i].events &= ~POLLOUT;
                 }
 
             }
         }
-    }
-
+  }
     return 0;
 }
